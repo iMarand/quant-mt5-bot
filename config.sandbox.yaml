@@ -1,0 +1,90 @@
+# QuantBot configuration.
+# Secrets belong in environment variables, not here:
+#   QUANTBOT_MT5_LOGIN / QUANTBOT_MT5_PASSWORD / QUANTBOT_MT5_SERVER
+
+db_path: artifacts/sandbox.db
+
+# Master safety switch. true = signals are computed and journaled, no orders
+# are ever sent. Flip to false only when you actually want demo orders placed.
+dry_run: true
+
+data:
+  # Start narrow: fewer pairs reach a statistically meaningful journal faster
+  # (architecture §11, first open question).
+  symbols: [EURUSD]
+  timeframes: [M5, M15, M30, H1, H4, D1]
+  base_timeframe: M15
+  history_bars: 6000
+  # Cross-asset context (addendum §A) — add only symbols your broker offers.
+  correlated_symbols: []
+
+calendar:
+  enabled: true
+  currencies: [USD, EUR]
+  cache_minutes: 30
+  forexfactory_url: https://nfs.faireconomy.media/ff_calendar_thisweek.json
+  # Put a real contact address here; it is the polite thing to send.
+  user_agent: "quantbot/0.1 (research; contact: set-me-in-config)"
+  request_min_interval_s: 2.0
+  # Investing.com scraping violates their ToS. Leave false unless you have a
+  # licensed feed of your own (see connectors/investing.py).
+  investing_enabled: false
+
+broker:
+  kind: paper          # paper | mt5
+  allow_live: false    # true would permit a REAL MT5 account. Do not.
+  magic: 990101
+  deviation: 20
+  paper_balance: 10000.0
+  paper_spread_points: 12.0
+  paper_commission_per_lot: 3.5
+
+risk:
+  risk_per_trade_pct: 0.5
+  max_daily_loss_pct: 3.0
+  max_open_positions: 3
+  max_positions_per_symbol: 1
+  max_total_risk_pct: 2.0
+  min_confidence: 0.58
+  atr_period: 14
+  sl_atr_mult: 1.8
+  tp_atr_mult: 2.7
+  min_rr: 1.2
+  max_risk_overshoot: 1.25
+  max_sl_distance_pct: 5.0
+  # Dynamic stop management (addendum §B)
+  breakeven_at_r: 1.0
+  trail_start_r: 1.2
+  trail_atr_mult: 1.5
+  partial_tp_at_r: 1.5
+  partial_tp_fraction: 0.5
+  # Hard veto around high-impact releases
+  news_veto_minutes: 15
+  news_veto_impact: high
+
+model:
+  horizon_bars: 8        # 8 x M15 = 2 hours
+  label_atr_mult: 1.0
+  min_train_rows: 800
+  n_splits: 5
+  embargo_bars: 24
+  registry_dir: artifacts/models-sandbox
+
+# The promotion gate (§8.3). Set this BEFORE the demo run, and do not edit it
+# afterwards to fit the results — that defeats the entire purpose.
+gate:
+  min_trades: 200
+  min_directional_accuracy: 0.53
+  min_profit_factor: 1.2
+  min_sharpe: 0.8
+  max_drawdown_pct: 15.0
+  max_calibration_error: 0.08
+  min_regimes_passing: 2
+
+ops:
+  interval_minutes: 15
+  event_lookahead_minutes: 5
+  event_followup_minutes: 3
+  drift_psi_threshold: 0.25
+  feed_gap_tolerance_bars: 3
+  log_level: INFO

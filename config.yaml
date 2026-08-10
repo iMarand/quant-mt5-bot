@@ -1,0 +1,194 @@
+# QuantBot configuration.
+# Secrets belong in environment variables, not here:
+#   QUANTBOT_MT5_LOGIN / QUANTBOT_MT5_PASSWORD / QUANTBOT_MT5_SERVER
+
+db_path: artifacts/quantbot.db
+
+# Master safety switch. true = signals are computed and journaled, no orders
+# are ever sent. Flip to false only when you actually want demo orders placed.
+dry_run: true
+
+data:
+  # Sessions only matter if you hold pairs that trade in them. These five majors
+  # cover the whole 24h cycle: AUD/NZD for Sydney, JPY for Tokyo, EUR/GBP for
+  # London, and every USD pair for New York.
+  symbols: [EURUSD, GBPUSD, USDJPY, AUDUSD, USDCAD]
+  timeframes: [M5, M15, M30, H1, H4, D1]
+  base_timeframe: M15
+  # Base-timeframe bars used for features/training. 30000 M15 bars is ~1.5
+  # years, enough to span several regimes; ingest scales this per timeframe.
+  history_bars: 30000
+  # Cross-asset context (addendum §A) — add only symbols your broker offers.
+  correlated_symbols: []
+
+calendar:
+  enabled: true
+  # Must cover every currency in data.symbols, or the news gate goes blind for
+  # the pairs whose currencies are missing.
+  currencies: [USD, EUR, GBP, JPY, AUD, CAD, NZD, CHF]
+  cache_minutes: 30
+  forexfactory_url: https://nfs.faireconomy.media/ff_calendar_thisweek.json
+  # Put a real contact address here; it is the polite thing to send.
+  user_agent: "quantbot/0.1 (research; contact: set-me-in-config)"
+  request_min_interval_s: 2.0
+  # Investing.com scraping violates their ToS. Leave false unless you have a
+  # licensed feed of your own (see connectors/investing.py).
+  investing_enabled: false
+
+broker:
+  kind: paper          # paper | mt5
+  allow_live: false    # true would permit a REAL MT5 account. Do not.
+  magic: 990101
+  deviation: 20
+  paper_balance: 10000.0
+  paper_spread_points: 12.0
+  paper_commission_per_lot: 3.5
+
+risk:
+  risk_per_trade_pct: 0.5
+  max_daily_loss_pct: 3.0
+  max_open_positions: 4
+  max_positions_per_symbol: 1
+  max_total_risk_pct: 2.5
+  min_confidence: 0.58
+  atr_period: 14
+  sl_atr_mult: 1.8
+  tp_atr_mult: 2.7
+  min_rr: 1.2
+  # Refuse a trade when rounding up to the broker's minimum lot would risk more
+  # than risk_per_trade_pct allows, beyond this multiple.
+  max_risk_overshoot: 1.25
+  # Sanity bound on stop distance as a % of price. A 5% stop is already huge for
+  # FX; past it, the ATR estimate is broken (bad or mixed candle data).
+  max_sl_distance_pct: 5.0
+  # Dynamic stop management (addendum §B)
+  breakeven_at_r: 1.0
+  trail_start_r: 1.2
+  trail_atr_mult: 1.5
+  partial_tp_at_r: 1.5
+  partial_tp_fraction: 0.5
+  # Hard veto around high-impact releases
+  news_veto_minutes: 15
+  news_veto_impact: high
+
+# Ordered pre-trade checks. These run BEFORE any indicator or model work:
+#   calendar -> clock/data freshness -> news -> session -> only then, setups.
+pretrade:
+  require_calendar: true          # refuse to trade blind with no calendar
+  require_relevant_calendar: false
+  max_calendar_age_days: 10.0     # a calendar that stopped updating is dangerous
+  max_bar_age_multiple: 4.0       # stale-feed detection, in bar lengths
+  block_before_news_min: 20.0     # no new positions into a high-impact release
+  news_window_after_min: 45.0     # how long after counts as the news window
+  news_overrides_session: true    # a big print moves the pair in any session
+  year_end_blackout_from_day: 24
+  blackout_dates: []              # e.g. ["2026-12-25"]
+
+# Trading modes. Scalp and swing are separate configurations, not just
+# different bar sizes: stops, risk, sessions and setups all differ.
+modes:
+  swing:
+    enabled: true
+    base_timeframe: H1
+    timeframes: [M15, M30, H1, H4, D1]
+    horizon_bars: 12              # 12 x H1 = half a day
+    # Empty = derive the sessions from each pair's own currencies, so
+    # USDJPY trades Tokyo+NY, AUDUSD trades Sydney+NY, EURUSD London+NY.
+    # That gives genuine round-the-clock coverage instead of one window.
+    sessions: []
+    setups: [trend_pullback, breakout, news_reaction, news_breakout]
+    min_confidence: 0.60
+    sl_atr_mult: 2.0
+    tp_atr_mult: 3.5
+    risk_per_trade_pct: 0.5
+    max_positions: 3
+    breakeven_at_r: 1.0
+    trail_start_r: 1.5
+
+  scalp:
+    enabled: true
+    base_timeframe: M5
+    timeframes: [M5, M15, M30, H1]
+    horizon_bars: 6               # 6 x M5 = 30 minutes
+    # Also auto-derived. Scalping thin sessions costs more in spread, so the
+    # confidence bar below is deliberately higher; check `report --by-session`
+    # and restrict this list again if Asian-hours scalps underperform.
+    sessions: []
+    setups: [sr_rejection, mean_reversion, breakout, news_breakout]
+    min_confidence: 0.66          # a tighter stop demands a better signal
+    sl_atr_mult: 1.2
+    tp_atr_mult: 1.8
+    risk_per_trade_pct: 0.25
+    max_positions: 2
+    breakeven_at_r: 0.6           # get risk off the table fast
+    trail_start_r: 0.8
+    trail_atr_mult: 1.0
+    partial_tp_at_r: 1.0
+    max_bars_in_trade: 24         # kill scalps that go nowhere
+
+# Strategy-first decisioning. A named setup must fire before any trade is
+# considered; the model only assists. This is the primary control surface —
+# tune here before touching the model.
+strategy:
+  model_role: assistant   # assistant | off  (off = pure rules, no ML at all)
+  model_assist_weight: 0.4   # model may scale confidence by up to +/-40%
+  model_veto_below: 0.38     # model vetoes a setup it strongly disagrees with
+
+  min_setup_quality: 0.25    # ignore weak rule matches
+  min_confluence: 1          # how many agreeing setups are required
+  confluence_bonus: 0.15     # extra conviction per additional agreeing setup
+  require_news: false        # true = only trade when an event setup fires
+
+  base_confidence: 0.55      # confidence of a bare-minimum trigger
+  max_confidence: 0.90       # confidence of a perfect one
+
+  setups:
+    trend_pullback:          # HTF trend + pullback + momentum turning
+      enabled: true
+      htf: H1
+      min_adx: 20.0
+    breakout:                # fresh range break with volatility expansion
+      enabled: true
+      threshold: 0.95
+      min_adx: 18.0
+    mean_reversion:          # fade band extreme, ranging only, needs rejection
+      enabled: true
+      max_adx: 20.0
+      band: 0.92
+    sr_rejection:            # rejection candle at a swing level
+      enabled: true
+      proximity: 0.0015
+    news_reaction:           # trade the surprise once price confirms it
+      enabled: true
+      min_surprise_z: 0.6
+      react_within_min: 45.0
+    news_breakout:           # trade the post-release range break
+      enabled: true
+      threshold: 0.9
+
+model:
+  horizon_bars: 8        # 8 x M15 = 2 hours
+  label_atr_mult: 1.0
+  min_train_rows: 800
+  n_splits: 5
+  embargo_bars: 24
+  registry_dir: artifacts/models
+
+# The promotion gate (§8.3). Set this BEFORE the demo run, and do not edit it
+# afterwards to fit the results — that defeats the entire purpose.
+gate:
+  min_trades: 200
+  min_directional_accuracy: 0.53
+  min_profit_factor: 1.2
+  min_sharpe: 0.8
+  max_drawdown_pct: 15.0
+  max_calibration_error: 0.08
+  min_regimes_passing: 2
+
+ops:
+  interval_minutes: 15
+  event_lookahead_minutes: 5
+  event_followup_minutes: 3
+  drift_psi_threshold: 0.25
+  feed_gap_tolerance_bars: 3
+  log_level: INFO
