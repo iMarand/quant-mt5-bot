@@ -167,6 +167,9 @@ class Signal:
     #: Sessions live when this signal was formed, e.g. "london+newyork".
     session: str = ""
 
+    def reasons_list(self) -> list[str]:
+        return [r.strip() for r in self.rationale.split(";") if r.strip()]
+
     def to_row(self) -> dict[str, Any]:
         return {
             "ts": as_utc(self.ts).isoformat(),

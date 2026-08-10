@@ -20,6 +20,14 @@ import pandas as pd
 
 from ..contracts import Direction
 from .base import Setup, Strategy, StrategyContext
+from .indicators_setups import (
+    DivergenceReversal,
+    EmaCross,
+    EmaRibbon,
+    PriceAction,
+    SessionOpenRange,
+    VolumeSurge,
+)
 from .news import NewsBreakout, NewsReaction
 from .technical import Breakout, MeanReversion, SupportResistanceRejection, TrendPullback
 
@@ -33,6 +41,12 @@ REGISTRY: dict[str, type[Strategy]] = {
     SupportResistanceRejection.name: SupportResistanceRejection,
     NewsReaction.name: NewsReaction,
     NewsBreakout.name: NewsBreakout,
+    EmaCross.name: EmaCross,
+    EmaRibbon.name: EmaRibbon,
+    VolumeSurge.name: VolumeSurge,
+    DivergenceReversal.name: DivergenceReversal,
+    PriceAction.name: PriceAction,
+    SessionOpenRange.name: SessionOpenRange,
 }
 
 
@@ -167,7 +181,7 @@ class StrategyBook:
           * veto outright when it strongly disagrees.
         It may never flip the direction or create one.
         """
-        if proba is None or not decision.triggered or self.cfg.model_role == "off":
+        if proba is None or not decision.triggered or self.cfg.effective_model_role() == "off":
             return decision
 
         p_down, _p_flat, p_up = (float(x) for x in proba)

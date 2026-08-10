@@ -9,10 +9,31 @@ db_path: artifacts/quantbot.db
 dry_run: true
 
 data:
-  # Sessions only matter if you hold pairs that trade in them. These five majors
-  # cover the whole 24h cycle: AUD/NZD for Sydney, JPY for Tokyo, EUR/GBP for
-  # London, and every USD pair for New York.
-  symbols: [EURUSD, GBPUSD, USDJPY, AUDUSD, USDCAD]
+  # Sessions only matter if you hold pairs that trade in them. This set spans
+  # the whole 24h cycle: AUD/NZD for Sydney, JPY crosses for Tokyo, EUR/GBP/CHF
+  # for London, and every USD pair for New York.
+  #
+  # More pairs = more opportunities but also more concurrent exposure; the caps
+  # under `risk:` are what stop that becoming reckless. Comment out anything
+  # your broker does not offer — `doctor` will tell you.
+  symbols:
+    # majors
+    - EURUSD
+    - GBPUSD
+    - USDJPY
+    - AUDUSD
+    - USDCAD
+    - USDCHF
+    - NZDUSD
+    # crosses — often trend better than the majors, wider spreads
+    - EURJPY
+    - GBPJPY
+    - EURGBP
+    - AUDJPY
+    - EURAUD
+    # metals (XAUUSD is far more volatile than FX; its own ATR handles sizing,
+    # but expect fewer, larger-stop trades)
+    - XAUUSD
   timeframes: [M5, M15, M30, H1, H4, D1]
   base_timeframe: M15
   # Base-timeframe bars used for features/training. 30000 M15 bars is ~1.5
@@ -96,7 +117,8 @@ modes:
     # USDJPY trades Tokyo+NY, AUDUSD trades Sydney+NY, EURUSD London+NY.
     # That gives genuine round-the-clock coverage instead of one window.
     sessions: []
-    setups: [trend_pullback, breakout, news_reaction, news_breakout]
+    setups: [trend_pullback, ema_cross, ema_ribbon, breakout,
+             session_open_range, news_reaction, news_breakout]
     min_confidence: 0.60
     sl_atr_mult: 2.0
     tp_atr_mult: 3.5
@@ -114,7 +136,8 @@ modes:
     # confidence bar below is deliberately higher; check `report --by-session`
     # and restrict this list again if Asian-hours scalps underperform.
     sessions: []
-    setups: [sr_rejection, mean_reversion, breakout, news_breakout]
+    setups: [sr_rejection, mean_reversion, divergence_reversal,
+             price_action, volume_surge, breakout, news_breakout]
     min_confidence: 0.66          # a tighter stop demands a better signal
     sl_atr_mult: 1.2
     tp_atr_mult: 1.8
@@ -130,34 +153,88 @@ modes:
 # considered; the model only assists. This is the primary control surface —
 # tune here before touching the model.
 strategy:
-  model_role: assistant   # assistant | off  (off = pure rules, no ML at all)
+  # ---- AI ----------------------------------------------------------------
+  # Master switch. false = pure rules, no ML anywhere in the decision path.
+  use_ai: true
+  model_role: assistant      # assistant | off  (ignored when use_ai is false)
   model_assist_weight: 0.4   # model may scale confidence by up to +/-40%
   model_veto_below: 0.38     # model vetoes a setup it strongly disagrees with
 
+  # ---- how triggers combine ----------------------------------------------
   min_setup_quality: 0.25    # ignore weak rule matches
-  min_confluence: 1          # how many agreeing setups are required
+  min_confluence: 1          # agreeing setups required to trade (2 = stricter)
   confluence_bonus: 0.15     # extra conviction per additional agreeing setup
   require_news: false        # true = only trade when an event setup fires
 
   base_confidence: 0.55      # confidence of a bare-minimum trigger
   max_confidence: 0.90       # confidence of a perfect one
 
+  # ---- when to actually enter --------------------------------------------
+  # off      : enter on the trigger bar (most trades, worst average entry)
+  # momentum : wait until price moves confirm_atr_mult x ATR in favour
+  # pullback : wait for a retrace toward the trigger price
+  confirmation: "off"
+  confirm_atr_mult: 0.25
+  confirm_max_wait_bars: 3
+
+  # ---- the strategies ----------------------------------------------------
+  # Turn any of these off with `enabled: false`. Each mode below picks the
+  # subset it trades; a setup must be enabled here AND listed there.
   setups:
+
+    # --- trend / EMA ---
     trend_pullback:          # HTF trend + pullback + momentum turning
       enabled: true
       htf: H1
       min_adx: 20.0
+    ema_cross:               # fresh fast/slow EMA cross, HTF-filtered
+      enabled: true
+      htf: H1
+      require_htf_agreement: true
+      min_adx: 15.0
+    ema_ribbon:              # all EMAs stacked, price riding them
+      enabled: true
+      min_adx: 22.0
+      max_stretch: 0.004     # too far from the ribbon = chasing
+
+    # --- breakout ---
     breakout:                # fresh range break with volatility expansion
       enabled: true
       threshold: 0.95
       min_adx: 18.0
+    session_open_range:      # break of the range set at a session open
+      enabled: true
+      open_hours: [7.0, 12.0]
+      window_hours: 3.0
+      threshold: 0.9
+
+    # --- reversal / mean reversion ---
     mean_reversion:          # fade band extreme, ranging only, needs rejection
       enabled: true
       max_adx: 20.0
       band: 0.92
+    divergence_reversal:     # price at extreme, momentum not confirming
+      enabled: true
+      max_adx: 28.0
+      extreme: 0.85
     sr_rejection:            # rejection candle at a swing level
       enabled: true
       proximity: 0.0015
+
+    # --- price action (no indicators) ---
+    price_action:            # engulfing / pin bar, candles only
+      enabled: true
+      min_body_ratio: 0.45
+      min_wick_ratio: 0.35
+      require_trend_agreement: false
+
+    # --- volume ---
+    volume_surge:            # move backed by participation, not drift
+      enabled: true
+      min_body_ratio: 0.55
+      min_obv_slope: 0.15
+
+    # --- news / calendar ---
     news_reaction:           # trade the surprise once price confirms it
       enabled: true
       min_surprise_z: 0.6

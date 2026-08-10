@@ -293,3 +293,169 @@ def test_a_broken_setup_does_not_kill_the_cycle():
         ctx(row(M15_dist_to_low=0.0005, M15_pat_pin_bull=1.0, M15_lower_wick_ratio=0.6))
     )
     assert [s.name for s in setups] == ["sr_rejection"]
+
+
+# -- new setup families -----------------------------------------------------
+
+
+def test_ema_cross_requires_a_fresh_cross():
+    from quantbot.strategy import EmaCross
+
+    s = EmaCross(require_htf_agreement=False, min_adx=0)
+    fresh = s.evaluate(ctx(row(M15_ema_fast_slow=0.0004), row(M15_ema_fast_slow=-0.0002)))
+    assert fresh is not None and fresh.direction is Direction.LONG
+    # Already crossed last bar -> not a trigger.
+    stale = s.evaluate(ctx(row(M15_ema_fast_slow=0.0008), row(M15_ema_fast_slow=0.0004)))
+    assert stale is None
+
+
+def test_ema_cross_respects_the_higher_timeframe():
+    from quantbot.strategy import EmaCross
+
+    s = EmaCross(require_htf_agreement=True, min_adx=0)
+    against = s.evaluate(
+        ctx(row(M15_ema_fast_slow=0.0004, H1_ema_fast_slow=-0.002),
+            row(M15_ema_fast_slow=-0.0002))
+    )
+    assert against is None
+
+
+def test_ema_ribbon_fires_on_a_fresh_pullback_to_the_ribbon():
+    from quantbot.strategy import EmaRibbon
+
+    s = EmaRibbon(min_adx=20, max_stretch=0.004, touch_distance=0.0008)
+    touched = s.evaluate(
+        ctx(row(M15_ema_10_dist=0.0004, M15_ema_20_dist=0.002, M15_ema_50_dist=0.003, M15_adx=30),
+            row(M15_ema_10_dist=0.0020))  # was away from the ribbon last bar
+    )
+    assert touched is not None and touched.direction is Direction.LONG
+
+
+def test_ema_ribbon_does_not_fire_every_bar_of_a_trend():
+    """Stacked EMAs are a state, not an event — firing on it would trigger
+    on nearly every bar of a trend."""
+    from quantbot.strategy import EmaRibbon
+
+    s = EmaRibbon(min_adx=20, max_stretch=0.004, touch_distance=0.0008)
+    # Already at the ribbon last bar too -> not a fresh touch.
+    assert s.evaluate(
+        ctx(row(M15_ema_10_dist=0.0004, M15_ema_20_dist=0.002, M15_ema_50_dist=0.003, M15_adx=30),
+            row(M15_ema_10_dist=0.0005))
+    ) is None
+    # Stacked but stretched far above -> chasing, no trade.
+    assert s.evaluate(
+        ctx(row(M15_ema_10_dist=0.02, M15_ema_20_dist=0.03, M15_ema_50_dist=0.04, M15_adx=30),
+            row(M15_ema_10_dist=0.03))
+    ) is None
+
+
+def test_volume_surge_needs_flow_and_price_to_agree():
+    from quantbot.strategy import VolumeSurge
+
+    s = VolumeSurge(min_obv_slope=0.1, min_body_ratio=0.5, min_atr_percentile=0.4)
+    agree = s.evaluate(ctx(row(M15_obv_slope=0.5, M15_body_ratio=0.7, M15_ret_1=0.001,
+                               M15_atr_percentile=0.6)))
+    assert agree is not None and agree.direction is Direction.LONG
+    # Flow up, price down -> churn, no trade.
+    assert s.evaluate(ctx(row(M15_obv_slope=0.5, M15_body_ratio=0.7, M15_ret_1=-0.001,
+                              M15_atr_percentile=0.6))) is None
+
+
+def test_divergence_reversal_will_not_fade_a_strong_trend():
+    from quantbot.strategy import DivergenceReversal
+
+    s = DivergenceReversal(max_adx=28)
+    trending = s.evaluate(
+        ctx(row(M15_range_position=0.95, M15_rsi_14=60, M15_macd_hist_norm=0.0001,
+                M15_adx=40, M15_pat_pin_bear=1.0),
+            row(M15_macd_hist_norm=0.0003))
+    )
+    assert trending is None
+
+
+def test_price_action_is_indicator_free():
+    from quantbot.strategy import PriceAction
+
+    s = PriceAction(min_body_ratio=0.4)
+    # Only candle features present — no RSI/ADX/EMA at all.
+    bar = pd.Series({
+        "M15_pat_bullish_engulfing": 1.0, "M15_pat_bearish_engulfing": 0.0,
+        "M15_pat_pin_bull": 0.0, "M15_pat_pin_bear": 0.0,
+        "M15_body_ratio": 0.8, "M15_lower_wick_ratio": 0.1, "M15_upper_wick_ratio": 0.1,
+    })
+    setup = s.evaluate(StrategyContext(bar, None, BASE))
+    assert setup is not None and setup.direction is Direction.LONG
+
+
+def test_session_open_range_only_fires_near_a_session_open():
+    from quantbot.strategy import SessionOpenRange
+
+    s = SessionOpenRange(open_hours=(7.0,), window_hours=3.0, threshold=0.9)
+    near = s.evaluate(ctx(row(M15_hour=8.0, M15_range_position=0.95, M15_atr_percentile=0.6)))
+    assert near is not None and near.direction is Direction.LONG
+    far = s.evaluate(ctx(row(M15_hour=18.0, M15_range_position=0.95, M15_atr_percentile=0.6)))
+    assert far is None
+
+
+# -- the AI master switch ---------------------------------------------------
+
+
+def test_use_ai_false_disables_the_model_entirely():
+    cfg = StrategyConfig(use_ai=False, model_role="assistant")
+    assert cfg.effective_model_role() == "off"
+    book = StrategyBook(cfg)
+    decision = book.combine([Setup("a", Direction.LONG, 0.8)])
+    before = decision.confidence
+    after = book.apply_model(decision, np.array([0.9, 0.05, 0.05]))
+    assert after.triggered and after.confidence == before
+
+
+# -- entry confirmation -----------------------------------------------------
+
+
+def test_momentum_confirmation_waits_for_price_to_move_in_favour():
+    from datetime import datetime, timezone
+
+    from quantbot.strategy import ConfirmationPolicy
+
+    policy = ConfirmationPolicy(mode="momentum", confirm_atr_mult=0.5, max_wait_bars=3)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    policy.register("k", "EURUSD", Direction.LONG, 1.1000, 0.0010, "breakout", 0.7, now)
+
+    ok, _ = policy.check("k", 1.10010)  # +1 pip, needs +5
+    assert not ok
+    ok, note = policy.check("k", 1.10060)  # +6 pips
+    assert ok and "confirmed" in note
+
+
+def test_pending_entry_expires_rather_than_waiting_forever():
+    from datetime import datetime, timezone
+
+    from quantbot.strategy import ConfirmationPolicy
+
+    policy = ConfirmationPolicy(mode="momentum", confirm_atr_mult=0.5, max_wait_bars=2)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    policy.register("k", "EURUSD", Direction.LONG, 1.1000, 0.0010, "breakout", 0.7, now)
+    policy.check("k", 1.1000)
+    policy.check("k", 1.1000)
+    ok, note = policy.check("k", 1.1000)
+    assert not ok and "expired" in note
+    assert policy.pending_for("k") is None
+
+
+def test_pullback_confirmation_abandons_a_runaway_move():
+    from datetime import datetime, timezone
+
+    from quantbot.strategy import ConfirmationPolicy
+
+    policy = ConfirmationPolicy(mode="pullback", confirm_atr_mult=0.5, max_wait_bars=5)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    policy.register("k", "EURUSD", Direction.LONG, 1.1000, 0.0010, "breakout", 0.7, now)
+    ok, note = policy.check("k", 1.1030)  # ran 30 pips without us
+    assert not ok and "ran away" in note
+
+
+def test_confirmation_off_means_no_pending_state():
+    from quantbot.strategy import ConfirmationPolicy
+
+    assert not ConfirmationPolicy(mode="off").enabled

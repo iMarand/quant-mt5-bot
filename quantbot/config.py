@@ -174,8 +174,11 @@ class ModeConfig:
 class StrategyConfig:
     """Strategy-first decisioning. Setups decide; the model only assists."""
 
+    #: Master AI switch. False = pure rules, no ML anywhere in the decision.
+    use_ai: bool = True
     #: "assistant" — model can damp/boost/veto a triggered setup, never create one.
     #: "off"       — pure rules, no model involvement at all.
+    #: `use_ai: false` forces this to "off" regardless of what is set here.
     model_role: str = "assistant"
     #: How much the model may scale confidence, e.g. 0.4 = up to +/-40%.
     model_assist_weight: float = 0.4
@@ -196,6 +199,12 @@ class StrategyConfig:
     base_confidence: float = 0.55
     max_confidence: float = 0.90
 
+    #: Entry timing. "off" enters on the trigger bar; "momentum" waits for
+    #: price to move in favour first; "pullback" waits for a retrace.
+    confirmation: str = "off"
+    confirm_atr_mult: float = 0.25
+    confirm_max_wait_bars: int = 3
+
     setups: dict[str, Any] = field(
         default_factory=lambda: {
             "trend_pullback": {"enabled": True, "htf": "H1", "min_adx": 20.0},
@@ -204,8 +213,18 @@ class StrategyConfig:
             "sr_rejection": {"enabled": True, "proximity": 0.0015},
             "news_reaction": {"enabled": True, "min_surprise_z": 0.6},
             "news_breakout": {"enabled": True, "threshold": 0.9},
+            "ema_cross": {"enabled": True, "htf": "H1", "min_adx": 15.0},
+            "ema_ribbon": {"enabled": True, "min_adx": 22.0},
+            "volume_surge": {"enabled": True, "min_body_ratio": 0.55},
+            "divergence_reversal": {"enabled": True, "max_adx": 28.0},
+            "price_action": {"enabled": True, "min_body_ratio": 0.45},
+            "session_open_range": {"enabled": True, "threshold": 0.9},
         }
     )
+
+    def effective_model_role(self) -> str:
+        """`use_ai: false` overrides model_role — one switch kills all ML."""
+        return self.model_role if self.use_ai else "off"
 
 
 @dataclass

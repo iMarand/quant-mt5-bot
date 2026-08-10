@@ -98,7 +98,7 @@ class Predictor:
 
         # The model is consulted only to *adjust* a decision the setups made.
         proba = None
-        if self.cfg.strategy.model_role != "off":
+        if self.cfg.strategy.effective_model_role() != "off":
             X = row.reindex(feats).to_frame().T.apply(pd.to_numeric, errors="coerce")
             proba = ens.predict_proba(X)[0]
 
@@ -150,7 +150,7 @@ class Predictor:
         feats = feature_columns(df)
         tf = self.cfg.data.base_timeframe
         ens = self.ensemble_for(symbol, tf)
-        if proba is None and self.cfg.strategy.model_role != "off":
+        if proba is None and self.cfg.strategy.effective_model_role() != "off":
             proba = ens.predict_proba(df[feats])
 
         out: list[Signal] = []

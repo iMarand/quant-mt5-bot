@@ -26,6 +26,7 @@ from ..decision.pretrade import GateResult, PreTradeGate
 from ..decision.risk import DailyLossTracker, RiskManager, TradePlan, Veto
 from ..engine.predictor import Predictor
 from ..features import feature_columns
+from ..strategy import ConfirmationPolicy
 from ..learning.journal import resolve_outcomes
 from ..storage import Database
 
@@ -106,6 +107,11 @@ class Runner:
                     bar_minutes=tf_minutes(mode.base_timeframe),
                 ),
                 "gate": PreTradeGate(cfg.pretrade, mode.session_policy),
+                "confirm": ConfirmationPolicy(
+                    mode=cfg.strategy.confirmation,
+                    confirm_atr_mult=cfg.strategy.confirm_atr_mult,
+                    max_wait_bars=cfg.strategy.confirm_max_wait_bars,
+                ),
             }
         log.info("modes: %s", ", ".join(str(m) for m in self.modes))
         self._guard_live()
@@ -258,6 +264,27 @@ class Runner:
 
         atr_value = _latest_atr(row, base_tf)
         spec = self.broker.symbol_spec(symbol)
+
+        # Entry timing: a setup says "conditions are right", not "the move has
+        # started". When enabled, hold the signal until price confirms it.
+        confirm: ConfirmationPolicy = rt["confirm"]
+        key = f"{mode_name}/{symbol}"
+        if confirm.enabled:
+            price_now = float(row.get(f"{base_tf}_close", 0.0) or 0.0)
+            if confirm.pending_for(key) is None:
+                confirm.register(
+                    key, symbol, signal.direction, price_now, atr_value,
+                    signal.setup, signal.confidence, utcnow(), signal.reasons_list(),
+                )
+                result.managed.append(f"{key}: waiting for entry confirmation")
+                self.db.record_prediction(signal, veto_reason="awaiting_confirmation")
+                return
+            ok, note = confirm.check(key, price_now)
+            if note:
+                result.managed.append(f"{key}: {note}")
+            if not ok:
+                self.db.record_prediction(signal, veto_reason="awaiting_confirmation")
+                return
         # The paper broker has no feed of its own; drive it from the last bar so
         # the same cycle code works with or without a real broker connection.
         if hasattr(self.broker, "set_price"):
