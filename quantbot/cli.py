@@ -66,17 +66,27 @@ def cmd_doctor(args) -> int:
     n_events = db.query("SELECT COUNT(*) c FROM calendar_events")[0]["c"]
     print(f"  calendar events: {n_events}")
 
-    print("\n-- models --")
-    for symbol in cfg.data.symbols:
-        row = db.active_model(symbol, cfg.data.base_timeframe)
-        if row:
-            m = json.loads(row["metrics"])
-            print(
-                f"  {symbol}: {row['version']} score={m.get('score')} "
-                f"dir_acc={m.get('directional_accuracy')}"
-            )
-        else:
-            print(f"  {symbol}: no trained model — rules baseline in use")
+    # Per mode: a mode only ever finds a model registered on ITS OWN base
+    # timeframe, so reporting one global timeframe hides the case where every
+    # model exists but none is reachable by the running bot.
+    print("\n-- models (per mode) --")
+    from .decision.modes import build_modes
+
+    for mode in build_modes(cfg):
+        have, missing = [], []
+        for symbol in cfg.data.symbols:
+            row = db.active_model(symbol, mode.base_timeframe)
+            if row:
+                m = json.loads(row["metrics"])
+                have.append(f"{symbol}({m.get('directional_accuracy')})")
+            else:
+                missing.append(symbol)
+        print(f"  {mode.name} tf={mode.base_timeframe}:")
+        if have:
+            print(f"      trained: {', '.join(have)}")
+        if missing:
+            print(f"      NO MODEL (rules only): {', '.join(missing)}")
+            print(f"      fix: python -m quantbot train --mode {mode.name}")
 
     print("\n-- MT5 terminal --")
     try:
@@ -307,15 +317,41 @@ def cmd_predict(args) -> int:
 
 def cmd_train(args) -> int:
     cfg, db = _context(args)
+    from .decision.modes import build_modes
     from .learning.retrain import retrain_symbol
 
-    for symbol in args.symbols or cfg.data.symbols:
-        try:
-            result = retrain_symbol(cfg, db, symbol, activate=not args.no_activate)
-        except Exception as exc:
-            print(f"{symbol}: FAILED — {exc}")
-            continue
-        print(json.dumps(result, indent=2))
+    # Train one model per (symbol, mode) — a mode looks its model up by ITS OWN
+    # base timeframe, so a model registered under data.base_timeframe is never
+    # found by a swing (H1) or scalp (M5) runtime and the bot silently runs on
+    # rules alone.
+    modes = build_modes(cfg)
+    if args.mode:
+        modes = [m for m in modes if m.name == args.mode]
+        if not modes:
+            print(f"unknown mode {args.mode!r}")
+            return 1
+
+    symbols = args.symbols or cfg.data.symbols
+    total = len(modes) * len(symbols)
+    print(f"training {total} model(s): {len(symbols)} symbol(s) x {len(modes)} mode(s)")
+    print("modes: " + ", ".join(f"{m.name}(tf={m.base_timeframe})" for m in modes))
+
+    done = 0
+    for mode in modes:
+        for symbol in symbols:
+            done += 1
+            label = f"[{done}/{total}] {mode.name}/{symbol} tf={mode.base_timeframe}"
+            try:
+                result = retrain_symbol(
+                    mode.cfg, db, symbol, activate=not args.no_activate
+                )
+            except Exception as exc:
+                print(f"{label}: FAILED — {exc}")
+                continue
+            print(
+                f"{label}: dir_acc={result.get('directional_accuracy')} "
+                f"rows={result.get('rows')} promoted={result.get('promoted')}"
+            )
     return 0
 
 
@@ -544,6 +580,7 @@ def build_parser() -> argparse.ArgumentParser:
     t = sub.add_parser("train", help="walk-forward retrain, promote if better")
     t.add_argument("symbols", nargs="*")
     t.add_argument("--no-activate", action="store_true")
+    t.add_argument("--mode", help="train only this mode (swing/scalp)")
     t.set_defaults(func=cmd_train)
 
     s = sub.add_parser("search", help="evolutionary structure/strategy search")
