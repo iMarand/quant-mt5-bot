@@ -57,6 +57,11 @@ class SetupReliability:
     def describe(self) -> list[str]:
         return [s.describe() for s in sorted(self.stats.values(), key=lambda s: -s.n)]
 
+    @staticmethod
+    def from_study(*args, **kwargs) -> "SetupReliability":
+        """See module-level `from_counterfactual`."""
+        return from_counterfactual(*args, **kwargs)
+
     @classmethod
     def from_journal(
         cls,
@@ -136,3 +141,51 @@ def setup_quality_columns(book, df, base_tf: str, prefix: str = "sq_"):
                 out[f"{prefix}{strat.name}"][i] = setup.quality * setup.direction.sign
         prev = row
     return pd.DataFrame(out, index=df.index)
+
+
+def from_counterfactual(
+    df,
+    prior_strength: float = 200.0,
+    min_weight: float = 0.6,
+    max_weight: float = 1.4,
+    min_samples: int = 100,
+    by_session: bool = False,
+) -> SetupReliability:
+    """Seed setup weights from a counterfactual study instead of the journal.
+
+    The live journal takes months to reach a usable sample per setup. A study
+    (learning/counterfactual.py) produces tens of thousands of simulated
+    triggers immediately, so the book can start out already sceptical of setups
+    that have never worked on this instrument.
+
+    The prior is deliberately much stronger than the journal's: these are
+    simulations with an optimistic cost model, not realized trades, so they
+    should nudge rather than dictate. Keys are `setup` or `setup@session`.
+    """
+    rel = SetupReliability(min_weight=min_weight, max_weight=max_weight)
+    if df is None or len(df) == 0:
+        return rel
+
+    keys = ["setup", "session"] if by_session else ["setup"]
+    for key, group in df.groupby(keys):
+        # pandas hands back a 1-tuple even for a single grouping column, and a
+        # key of "('breakout',)" would never match a setup lookup.
+        parts = key if isinstance(key, tuple) else (key,)
+        name = f"{parts[0]}@{parts[1]}" if by_session else str(parts[0])
+        n = int(len(group))
+        wins = int(group["won"].sum())
+        raw = wins / n if n else 0.5
+        shrunk = (wins + 0.5 * prior_strength) / (n + prior_strength)
+        weight = 1.0
+        if n >= min_samples:
+            weight = min(max(shrunk / 0.5, min_weight), max_weight)
+        rel.stats[name] = SetupStats(
+            name=name,
+            n=n,
+            wins=wins,
+            raw_accuracy=round(raw, 4),
+            shrunk_accuracy=round(shrunk, 4),
+            weight=round(weight, 4),
+        )
+    log.info("setup reliability seeded from %d simulated triggers", len(df))
+    return rel

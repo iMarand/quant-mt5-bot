@@ -197,6 +197,82 @@ def cmd_import_calendar(args) -> int:
     return 0
 
 
+def cmd_study(args) -> int:
+    cfg, db = _context(args)
+    from .learning.counterfactual import (
+        best_hours,
+        holdout_check,
+        profitable_combinations,
+        run_study,
+        summarize,
+    )
+
+    df = run_study(cfg, db, args.symbols or None)
+    if df.empty:
+        print("no setup triggers simulated — check that candles are ingested")
+        return 1
+
+    span = f"{df['ts'].min():%Y-%m-%d} -> {df['ts'].max():%Y-%m-%d}"
+    print(f"\nsimulated {len(df):,} setup triggers ({span})")
+
+    for title, keys in (
+        ("by setup", ["setup"]),
+        ("by setup x session", ["setup", "session"]),
+        ("by session", ["session"]),
+        ("by regime", ["regime"]),
+    ):
+        table = summarize(df, keys, min_n=args.min_n)
+        print(f"\n== {title} ==")
+        print(table.to_string() if not table.empty else "  (nothing with enough samples)")
+
+    news = df[df["in_news_window"] > 0]
+    if len(news) >= args.min_n:
+        print("\n== inside a news window ==")
+        print(summarize(news, ["setup"], min_n=args.min_n).to_string())
+
+    if args.setup:
+        print(f"\n== {args.setup}: by hour (UTC) ==")
+        hours = best_hours(df, args.setup, min_n=args.min_n)
+        print(hours.to_string() if not hours.empty else "  (nothing with enough samples)")
+
+    winners = profitable_combinations(df, min_n=args.min_n)
+    print("\n== combinations clearing the bar (IN-SAMPLE — selected on this data) ==")
+    print(winners.to_string() if not winners.empty else "  none")
+
+    check = holdout_check(df, min_n=args.min_n)
+    if not check.empty:
+        print("\n== do they hold up out-of-sample? ==")
+        print(check.head(15).to_string())
+        survivors = check[check["held_up"]]
+        print(
+            f"\n{len(survivors)}/{len(check)} combinations stayed positive after "
+            f"{check['split_at'].iloc[0]}."
+        )
+        if survivors.empty:
+            print(
+                "None survived. Every combination that looked profitable in the\n"
+                "earlier period lost money in the later one — which is what\n"
+                "selecting the best of dozens on one dataset produces when there\n"
+                "is no real edge."
+            )
+        else:
+            print("Survivors: " + ", ".join(str(i) for i in survivors.index))
+
+    print(
+        "\nCounterfactual simulations of every trigger, including ones the live"
+        "\nsystem would have skipped. Costs: spread at entry only, no slippage; a"
+        "\nbar touching both barriers is scored as a loss. Anything that looks good"
+        "\nhere was selected on the same data it is scored on — treat it as a"
+        "\nhypothesis, not a result."
+    )
+    if args.out:
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(out, index=False)
+        print(f"\nwrote {len(df):,} rows to {out}")
+    return 0
+
+
 def cmd_predict(args) -> int:
     cfg, db = _context(args)
     from .engine.predictor import Predictor
@@ -450,6 +526,15 @@ def build_parser() -> argparse.ArgumentParser:
     ic.add_argument("paths", nargs="+", help="csv files (globs allowed)")
     ic.add_argument("--tz-offset", type=float, default=0.0, help="source UTC offset in hours")
     ic.set_defaults(func=cmd_import_calendar)
+
+    st = sub.add_parser(
+        "study", help="counterfactual: which setup would have won, when, for how many pips"
+    )
+    st.add_argument("symbols", nargs="*")
+    st.add_argument("--min-n", type=int, default=30, help="ignore groups smaller than this")
+    st.add_argument("--setup", help="also break this setup down by hour")
+    st.add_argument("--out", help="write the full trigger table to CSV")
+    st.set_defaults(func=cmd_study)
 
     pr = sub.add_parser("predict", help="signal for the latest bar")
     pr.add_argument("symbols", nargs="*")

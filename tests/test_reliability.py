@@ -157,3 +157,67 @@ def test_setup_quality_columns_are_signed_by_direction():
     cols = setup_quality_columns(Book(), df, "M15")
     assert cols["sq_up"].iloc[0] == pytest.approx(0.8)
     assert cols["sq_down"].iloc[0] == pytest.approx(-0.6), "shorts must be negative"
+
+
+# -- seeding weights from a counterfactual study ----------------------------
+
+
+def _study_rows(setup, n, wins, session="london"):
+    import pandas as pd
+
+    return pd.DataFrame(
+        {
+            "setup": [setup] * n,
+            "session": [session] * n,
+            "won": [1] * wins + [0] * (n - wins),
+            "r_multiple": [0.5] * wins + [-0.5] * (n - wins),
+        }
+    )
+
+
+def test_study_keys_are_plain_setup_names():
+    """A key of "('breakout',)" would never match a setup lookup."""
+    from quantbot.learning.reliability import from_counterfactual
+
+    rel = from_counterfactual(_study_rows("breakout", 500, 300))
+    assert "breakout" in rel.stats
+    assert rel.weight("breakout") > 1.0
+
+
+def test_study_seeds_are_more_conservative_than_journal_seeds():
+    """Simulations should nudge, not dictate — they use an optimistic cost model."""
+    import pandas as pd
+
+    from quantbot.learning.reliability import SetupStats, from_counterfactual
+
+    rel = from_counterfactual(_study_rows("breakout", 1000, 600))  # 60% raw
+    assert rel.stats["breakout"].shrunk_accuracy < 0.60
+
+
+def test_study_below_min_samples_gives_no_opinion():
+    from quantbot.learning.reliability import from_counterfactual
+
+    rel = from_counterfactual(_study_rows("rare_setup", 20, 18), min_samples=100)
+    assert rel.weight("rare_setup") == 1.0
+
+
+def test_study_can_key_by_session():
+    import pandas as pd
+
+    from quantbot.learning.reliability import from_counterfactual
+
+    df = pd.concat([
+        _study_rows("breakout", 400, 260, session="london"),
+        _study_rows("breakout", 400, 140, session="tokyo"),
+    ])
+    rel = from_counterfactual(df, by_session=True)
+    assert rel.weight("breakout@london") > 1.0
+    assert rel.weight("breakout@tokyo") < 1.0
+
+
+def test_empty_study_yields_no_opinions():
+    import pandas as pd
+
+    from quantbot.learning.reliability import from_counterfactual
+
+    assert from_counterfactual(pd.DataFrame()).stats == {}
