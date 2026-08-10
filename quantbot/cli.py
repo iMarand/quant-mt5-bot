@@ -373,13 +373,11 @@ def cmd_report(args) -> int:
         max_weight=cfg.strategy.reliability_max_weight,
     )
     if rel.stats:
-        print("
-== learned setup reliability ==")
+        print("\n== learned setup reliability ==")
         for line in rel.describe():
             print("  " + line)
         print(
-            "
-Accuracy is shrunk toward 0.5 by "
+            f"\nAccuracy is shrunk toward 0.5 by "
             f"{cfg.strategy.reliability_prior_strength:.0f} pseudo-observations, so a"
         )
         print("young setup reads as unproven rather than brilliant. The weight")
