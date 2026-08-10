@@ -98,9 +98,17 @@ def build_strategies(cfg) -> list[Strategy]:
 
 
 class StrategyBook:
-    def __init__(self, cfg, strategies: list[Strategy] | None = None) -> None:
+    def __init__(
+        self,
+        cfg,
+        strategies: list[Strategy] | None = None,
+        reliability=None,
+    ) -> None:
         self.cfg = cfg
         self.strategies = strategies if strategies is not None else build_strategies(cfg)
+        #: Learned per-setup multipliers (learning/reliability.py). None = the
+        #: book has no history yet and treats every setup as unproven-neutral.
+        self.reliability = reliability
         if not self.strategies:
             log.warning("no setups enabled — nothing will ever trigger")
 
@@ -117,6 +125,14 @@ class StrategyBook:
                 continue
             if setup is not None and setup.quality >= self.cfg.min_setup_quality:
                 setup.quality *= strat.weight
+                # The learned half of "the model assists": a setup the journal
+                # says has been unreliable is down-weighted, one that has
+                # worked is boosted — both within bounded limits.
+                if self.reliability is not None and self.cfg.use_setup_reliability:
+                    factor = self.reliability.weight(setup.name)
+                    if factor != 1.0:
+                        setup.quality = min(setup.quality * factor, 1.0)
+                        setup.reasons.append(f"reliability x{factor:.2f}")
                 found.append(setup)
         return found
 

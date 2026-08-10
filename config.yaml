@@ -160,6 +160,22 @@ strategy:
   model_assist_weight: 0.4   # model may scale confidence by up to +/-40%
   model_veto_below: 0.38     # model vetoes a setup it strongly disagrees with
 
+  # Does the model know WHICH setup fired? With this on, every setup's quality
+  # becomes a signed model feature, so the learner can find setup-conditional
+  # edges ("breakout works in this regime, mean_reversion doesn't") instead of
+  # seeing only raw indicators.
+  model_sees_setups: true
+
+  # Scale each setup's quality by its measured hit rate from the journal.
+  # Accuracy is shrunk toward 0.5 so a young setup reads as unproven, and the
+  # multiplier is clipped so no setup can dominate or be silenced outright.
+  # See `quantbot report` for the learned table.
+  use_setup_reliability: true
+  reliability_prior_strength: 40.0   # pseudo-observations of 50/50 prior
+  reliability_min_samples: 20        # below this, no opinion at all
+  reliability_min_weight: 0.6
+  reliability_max_weight: 1.4
+
   # ---- how triggers combine ----------------------------------------------
   min_setup_quality: 0.25    # ignore weak rule matches
   min_confluence: 1          # agreeing setups required to trade (2 = stricter)

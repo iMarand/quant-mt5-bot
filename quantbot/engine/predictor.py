@@ -28,7 +28,25 @@ class Predictor:
         self.cfg = cfg
         self.db = db
         self._cache: dict[tuple[str, str], tuple[str, Ensemble]] = {}
-        self.book = StrategyBook(cfg.strategy)
+        self.book = StrategyBook(cfg.strategy, reliability=self._load_reliability())
+
+    def _load_reliability(self):
+        """Per-setup weights learned from the journal (learning/reliability.py)."""
+        if not self.cfg.strategy.use_setup_reliability:
+            return None
+        try:
+            from ..learning.reliability import SetupReliability
+
+            return SetupReliability.from_journal(
+                self.db,
+                prior_strength=self.cfg.strategy.reliability_prior_strength,
+                min_weight=self.cfg.strategy.reliability_min_weight,
+                max_weight=self.cfg.strategy.reliability_max_weight,
+                min_samples=self.cfg.strategy.reliability_min_samples,
+            )
+        except Exception as exc:
+            log.warning('could not load setup reliability: %s', exc)
+            return None
 
     # -- model loading -----------------------------------------------------
     def ensemble_for(self, symbol: str, timeframe: str) -> Ensemble:
@@ -78,7 +96,7 @@ class Predictor:
                 correlated[sym] = df
 
         events = self.db.events_df()
-        return build_feature_frame(
+        frame = build_feature_frame(
             frames,
             events,
             symbol=symbol,
@@ -87,6 +105,17 @@ class Predictor:
             news_window_min=self.cfg.risk.news_veto_minutes * 2,
             correlated=correlated,
         )
+
+        # Give the model visibility of the strategies themselves: one signed
+        # quality column per setup. Without these it can only see indicators
+        # and can never learn that a given setup is or isn't worth trusting.
+        if self.cfg.strategy.model_sees_setups:
+            from ..learning.reliability import setup_quality_columns
+
+            frame = frame.join(
+                setup_quality_columns(self.book, frame, self.cfg.data.base_timeframe)
+            )
+        return frame
 
     # -- inference ---------------------------------------------------------
     def predict_row(

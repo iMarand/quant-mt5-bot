@@ -199,6 +199,16 @@ class StrategyConfig:
     base_confidence: float = 0.55
     max_confidence: float = 0.90
 
+    #: Let the model see WHICH setups fired, as features. Without this the
+    #: model cannot learn setup-conditional edges — it only sees indicators.
+    model_sees_setups: bool = True
+    #: Scale setup quality by each setup's measured hit rate from the journal.
+    use_setup_reliability: bool = True
+    reliability_prior_strength: float = 40.0
+    reliability_min_samples: int = 20
+    reliability_min_weight: float = 0.6
+    reliability_max_weight: float = 1.4
+
     #: Entry timing. "off" enters on the trigger bar; "momentum" waits for
     #: price to move in favour first; "pullback" waits for a retrace.
     confirmation: str = "off"

@@ -363,6 +363,28 @@ def cmd_report(args) -> int:
         print("\nA setup with a losing profit factor over a decent sample is a")
         print("candidate to disable in config.yaml under strategy.setups.")
 
+    from .learning.reliability import SetupReliability
+
+    rel = SetupReliability.from_journal(
+        db,
+        prior_strength=cfg.strategy.reliability_prior_strength,
+        min_samples=cfg.strategy.reliability_min_samples,
+        min_weight=cfg.strategy.reliability_min_weight,
+        max_weight=cfg.strategy.reliability_max_weight,
+    )
+    if rel.stats:
+        print("
+== learned setup reliability ==")
+        for line in rel.describe():
+            print("  " + line)
+        print(
+            "
+Accuracy is shrunk toward 0.5 by "
+            f"{cfg.strategy.reliability_prior_strength:.0f} pseudo-observations, so a"
+        )
+        print("young setup reads as unproven rather than brilliant. The weight")
+        print("multiplies that setup's quality when it fires.")
+
     by_session = session_performance(db)
     if not by_session.empty:
         print("\n== realized PnL by session / mode ==")
