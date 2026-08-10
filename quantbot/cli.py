@@ -31,6 +31,28 @@ def _context(args) -> tuple[Config, Database]:
     return cfg, Database(cfg.db_file)
 
 
+def _resolve_symbols(requested, cfg: Config) -> list[str]:
+    """Validate requested symbols against config, or fail loudly.
+
+    A shell that does not treat '#' as a comment (cmd.exe) turns a trailing
+    comment into positional arguments, so "train  # the direction model" used to
+    try to train models for symbols named "the" and "model". Silently attempting
+    that and reporting ten failures is worse than refusing once.
+    """
+    if not requested:
+        return list(cfg.data.symbols)
+    known = set(cfg.data.symbols)
+    unknown = [s for s in requested if s not in known]
+    if unknown:
+        raise SystemExit(
+            f"unknown symbol(s): {', '.join(unknown)}\n"
+            f"configured symbols: {', '.join(cfg.data.symbols)}\n"
+            "\nIf you pasted a command with a trailing '# comment', note that "
+            "cmd.exe\ndoes not strip it — everything after '#' became an argument."
+        )
+    return list(requested)
+
+
 def _market_connector(cfg: Config):
     """MT5 for real data; the paper broker has no data feed of its own."""
     from .connectors.mt5_market import MT5MarketData
@@ -217,7 +239,8 @@ def cmd_study(args) -> int:
         summarize,
     )
 
-    df = run_study(cfg, db, args.symbols or None)
+    symbols = _resolve_symbols(args.symbols, cfg)
+    df = run_study(cfg, db, symbols)
     if df.empty:
         print("no setup triggers simulated — check that candles are ingested")
         return 1
@@ -320,7 +343,7 @@ def cmd_predict(args) -> int:
     from .engine.predictor import Predictor
 
     predictor = Predictor(cfg, db)
-    for symbol in args.symbols or cfg.data.symbols:
+    for symbol in _resolve_symbols(args.symbols, cfg):
         try:
             signal = predictor.predict_latest(symbol)
         except Exception as exc:
@@ -363,7 +386,7 @@ def cmd_train(args) -> int:
             print(f"unknown mode {args.mode!r}")
             return 1
 
-    symbols = args.symbols or cfg.data.symbols
+    symbols = _resolve_symbols(args.symbols, cfg)
     total = len(modes) * len(symbols)
     print(f"training {total} model(s): {len(symbols)} symbol(s) x {len(modes)} mode(s)")
     print("modes: " + ", ".join(f"{m.name}(tf={m.base_timeframe})" for m in modes))
@@ -392,7 +415,7 @@ def cmd_search(args) -> int:
     from .learning.retrain import retrain_symbol
     from .learning.search import EvolutionarySearch, apply_strategy_genes
 
-    for symbol in args.symbols or cfg.data.symbols:
+    for symbol in _resolve_symbols(args.symbols, cfg):
         search = EvolutionarySearch(
             cfg, db, population=args.population, generations=args.generations
         )
@@ -414,7 +437,7 @@ def cmd_backtest(args) -> int:
     cfg, db = _context(args)
     from .ops.backtest import render_backtest, run_backtest
 
-    for symbol in args.symbols or cfg.data.symbols:
+    for symbol in _resolve_symbols(args.symbols, cfg):
         try:
             result = run_backtest(
                 cfg,

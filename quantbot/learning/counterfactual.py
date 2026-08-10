@@ -193,17 +193,27 @@ def _walk_to_barrier(high, low, close, start, end, direction, sl, tp):
 
 
 def summarize(df: pd.DataFrame, by: list[str], min_n: int = 20) -> pd.DataFrame:
-    """Win rate, expectancy and total pips grouped however you ask."""
+    """Win rate and expectancy grouped however you ask.
+
+    Pips are only reported when the group is a single instrument. A pip is not
+    the same size on EURUSD, USDJPY and XAUUSD, so summing them across symbols
+    produces impressive-looking nonsense; R is the unit that compares.
+    """
     if df.empty:
         return df
-    grouped = df.groupby(by).agg(
-        n=("won", "size"),
-        win_rate=("won", "mean"),
-        avg_r=("r_multiple", "mean"),
-        total_pips=("pips", "sum"),
-        avg_pips=("pips", "mean"),
-        median_minutes=("minutes_held", "median"),
-    )
+    aggs = {
+        "n": ("won", "size"),
+        "win_rate": ("won", "mean"),
+        "avg_r": ("r_multiple", "mean"),
+        "total_r": ("r_multiple", "sum"),
+        "median_minutes": ("minutes_held", "median"),
+    }
+    single_symbol = "symbol" in by or df["symbol"].nunique() <= 1
+    if single_symbol and "pips" in df.columns:
+        aggs["total_pips"] = ("pips", "sum")
+        aggs["avg_pips"] = ("pips", "mean")
+
+    grouped = df.groupby(by).agg(**aggs)
     grouped = grouped[grouped["n"] >= min_n]
     return grouped.sort_values("avg_r", ascending=False).round(4)
 
@@ -282,8 +292,9 @@ def holdout_check(
     if early.empty or late.empty:
         return pd.DataFrame()
 
-    a = summarize(early, by, min_n=min_n)[["n", "win_rate", "avg_r", "total_pips"]]
-    b = summarize(late, by, min_n=max(10, min_n // 3))[["n", "win_rate", "avg_r", "total_pips"]]
+    cols = ["n", "win_rate", "avg_r", "total_r"]
+    a = summarize(early, by, min_n=min_n)[cols]
+    b = summarize(late, by, min_n=max(10, min_n // 3))[cols]
     joined = a.join(b, how="inner", lsuffix="_early", rsuffix="_late")
     if joined.empty:
         return joined
