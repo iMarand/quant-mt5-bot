@@ -72,6 +72,14 @@ class Ingestor:
             self.db.log_run("ingest_market", "error", str(exc))
             return 0
 
+        # Cache the broker's real contract details once per symbol, so
+        # offline tools don't fall back to FX defaults.
+        for symbol in symbols:
+            try:
+                self.db.save_symbol_spec(self.market.symbol_spec(symbol))
+            except Exception as exc:
+                log.debug("could not cache spec for %s: %s", symbol, exc)
+
         def pull(job: tuple[str, str]) -> list[Candle]:
             symbol, tf = job
             try:

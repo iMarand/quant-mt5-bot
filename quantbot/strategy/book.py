@@ -103,17 +103,22 @@ class StrategyBook:
         cfg,
         strategies: list[Strategy] | None = None,
         reliability=None,
+        selector=None,
     ) -> None:
         self.cfg = cfg
         self.strategies = strategies if strategies is not None else build_strategies(cfg)
         #: Learned per-setup multipliers (learning/reliability.py). None = the
         #: book has no history yet and treats every setup as unproven-neutral.
         self.reliability = reliability
+        #: Learned 'which setup works in this context' model (learning/selector.py).
+        self.selector = selector
         if not self.strategies:
             log.warning("no setups enabled — nothing will ever trigger")
 
     # -- steps 1-3 ---------------------------------------------------------
-    def triggered_setups(self, ctx: StrategyContext) -> list[Setup]:
+    def triggered_setups(
+        self, ctx: StrategyContext, runtime: dict | None = None
+    ) -> list[Setup]:
         found: list[Setup] = []
         for strat in self.strategies:
             if not strat.enabled:
@@ -128,11 +133,26 @@ class StrategyBook:
                 # The learned half of "the model assists": a setup the journal
                 # says has been unreliable is down-weighted, one that has
                 # worked is boosted — both within bounded limits.
+                session = (runtime or {}).get("session")
                 if self.reliability is not None and self.cfg.use_setup_reliability:
-                    factor = self.reliability.weight(setup.name)
+                    factor = self.reliability.weight(setup.name, session)
                     if factor != 1.0:
                         setup.quality = min(setup.quality * factor, 1.0)
                         setup.reasons.append(f"reliability x{factor:.2f}")
+
+                # The selector asks the narrower question the study data can
+                # actually answer: has THIS setup won in THIS context before?
+                if self.selector is not None and self.cfg.use_selector and runtime:
+                    p_win = self.selector.score_context(
+                        {**runtime, "setup": setup.name,
+                         "direction": setup.direction.value, "quality": setup.quality}
+                    )
+                    if p_win < self.cfg.selector_veto_below:
+                        log.debug("selector vetoed %s (p_win=%.2f)", setup.name, p_win)
+                        continue
+                    adjust = 1.0 + self.cfg.selector_weight * (2 * p_win - 1.0)
+                    setup.quality = min(max(setup.quality * adjust, 0.0), 1.0)
+                    setup.reasons.append(f"selector p(win)={p_win:.2f}")
                 found.append(setup)
         return found
 
@@ -227,7 +247,8 @@ class StrategyBook:
         prev: pd.Series | None,
         base_tf: str,
         proba: np.ndarray | None = None,
+        runtime: dict | None = None,
     ) -> Decision:
         ctx = StrategyContext(row, prev, base_tf)
-        decision = self.combine(self.triggered_setups(ctx))
+        decision = self.combine(self.triggered_setups(ctx, runtime))
         return self.apply_model(decision, proba)

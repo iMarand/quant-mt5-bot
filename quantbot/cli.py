@@ -280,6 +280,38 @@ def cmd_study(args) -> int:
         out.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(out, index=False)
         print(f"\nwrote {len(df):,} rows to {out}")
+
+    if args.save:
+        from .learning.reliability import study_stats_rows
+        from .learning.selector import SetupSelector, selector_path
+
+        rows = study_stats_rows(
+            df,
+            prior_strength=cfg.strategy.reliability_prior_strength * 5,
+            min_samples=cfg.strategy.reliability_min_samples * 5,
+            min_weight=cfg.strategy.reliability_min_weight,
+            max_weight=cfg.strategy.reliability_max_weight,
+        )
+        n = db.save_setup_study(rows)
+        print(f"\nsaved {n} setup/session weights — the runtime loads these on start")
+
+        try:
+            selector = SetupSelector()
+            metrics = selector.evaluate(df)
+            selector.fit(df)
+            selector.metrics = metrics
+            path = selector.save(selector_path(cfg))
+            print(f"trained setup selector -> {path}")
+            print("  validation (fit on the past, scored on the future):")
+            for k, v in metrics.items():
+                print(f"    {k:<22} {v}")
+            print(
+                "\n  decile_spread is the number that matters: win rate of the setups"
+                "\n  it rated best minus those it rated worst. Near zero means it"
+                "\n  cannot tell them apart, and it should stay switched off."
+            )
+        except Exception as exc:
+            print(f"selector training failed: {exc}")
     return 0
 
 
@@ -570,6 +602,11 @@ def build_parser() -> argparse.ArgumentParser:
     st.add_argument("--min-n", type=int, default=30, help="ignore groups smaller than this")
     st.add_argument("--setup", help="also break this setup down by hour")
     st.add_argument("--out", help="write the full trigger table to CSV")
+    st.add_argument(
+        "--save",
+        action="store_true",
+        help="persist weights and train the selector, so the runtime uses them",
+    )
     st.set_defaults(func=cmd_study)
 
     pr = sub.add_parser("predict", help="signal for the latest bar")

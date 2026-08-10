@@ -28,7 +28,26 @@ class Predictor:
         self.cfg = cfg
         self.db = db
         self._cache: dict[tuple[str, str], tuple[str, Ensemble]] = {}
-        self.book = StrategyBook(cfg.strategy, reliability=self._load_reliability())
+        self.book = StrategyBook(
+            cfg.strategy,
+            reliability=self._load_reliability(),
+            selector=self._load_selector(),
+        )
+
+    def _load_selector(self):
+        """The "which setup works here" model, if a study has trained one."""
+        if not self.cfg.strategy.use_selector:
+            return None
+        try:
+            from ..learning.selector import SetupSelector, selector_path
+
+            sel = SetupSelector.load(selector_path(self.cfg))
+            if sel is not None:
+                log.info('loaded setup selector %s', sel.version)
+            return sel
+        except Exception as exc:
+            log.warning('could not load selector: %s', exc)
+            return None
 
     def _load_reliability(self):
         """Per-setup weights learned from the journal (learning/reliability.py)."""
@@ -37,13 +56,18 @@ class Predictor:
         try:
             from ..learning.reliability import SetupReliability
 
-            return SetupReliability.from_journal(
+            from ..learning.reliability import combine, from_store
+
+            journal = SetupReliability.from_journal(
                 self.db,
                 prior_strength=self.cfg.strategy.reliability_prior_strength,
                 min_weight=self.cfg.strategy.reliability_min_weight,
                 max_weight=self.cfg.strategy.reliability_max_weight,
                 min_samples=self.cfg.strategy.reliability_min_samples,
             )
+            # Study supplies the prior; realized trades override it setup by
+            # setup as the journal accumulates enough to have an opinion.
+            return combine(journal, from_store(self.db))
         except Exception as exc:
             log.warning('could not load setup reliability: %s', exc)
             return None
@@ -131,8 +155,9 @@ class Predictor:
             X = row.reindex(feats).to_frame().T.apply(pd.to_numeric, errors="coerce")
             proba = ens.predict_proba(X)[0]
 
-        decision = self.book.decide(row, prev, tf, proba)
         regime = classify_regime(row, news_window_min=self.cfg.risk.news_veto_minutes * 2)
+        runtime = self._runtime_context(row, regime)
+        decision = self.book.decide(row, prev, tf, proba, runtime=runtime)
 
         driving: dict[str, float] = {
             f"setup_{s.name}": round(s.quality, 4) for s in decision.setups
@@ -158,6 +183,33 @@ class Predictor:
                 decision.reasons[:4] + ([decision.model_note] if decision.model_note else [])
             ),
         )
+
+    def _runtime_context(self, row, regime, symbol: str = "") -> dict:
+        """Context the selector reasons over — all known at decision time."""
+        from ..decision.sessions import active_sessions
+
+        ts = row.name
+        live = active_sessions(ts.to_pydatetime()) if hasattr(ts, "to_pydatetime") else []
+        session = (
+            "london_ny_overlap"
+            if "london_ny_overlap" in live
+            else (live[0] if live else "off_session")
+        )
+        base = self.cfg.data.base_timeframe
+        return {
+            "symbol": symbol,
+            "session": session,
+            "regime": regime.value,
+            "hour": int(getattr(ts, "hour", 0)),
+            "dow": int(getattr(ts, "dayofweek", 0)),
+            "in_news_window": float(row.get("in_news_window", 0.0) or 0.0),
+            "minutes_since_last_high": float(
+                row.get("minutes_since_last_high", 1440.0) or 1440.0
+            ),
+            "last_surprise_signed": float(row.get("last_surprise_signed", 0.0) or 0.0),
+            "atr_percentile": float(row.get(f"{base}_atr_percentile", 0.5) or 0.5),
+            "adx": float(row.get(f"{base}_adx", 20.0) or 20.0),
+        }
 
     def predict_latest(self, symbol: str) -> Signal:
         df = self.build_features(symbol)
@@ -186,7 +238,10 @@ class Predictor:
         prev = None
         for i, (ts, row) in enumerate(df.iterrows()):
             decision = self.book.decide(
-                row, prev, tf, None if proba is None else proba[i]
+                row, prev, tf, None if proba is None else proba[i],
+                runtime=self._runtime_context(
+                    row, classify_regime(row, self.cfg.risk.news_veto_minutes * 2), symbol
+                ),
             )
             prev = row
             out.append(

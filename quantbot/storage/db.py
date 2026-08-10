@@ -153,6 +153,32 @@ CREATE TABLE IF NOT EXISTS runs (
     detail    TEXT
 );
 
+CREATE TABLE IF NOT EXISTS symbol_specs (
+    symbol        TEXT PRIMARY KEY,
+    digits        INTEGER NOT NULL,
+    point         REAL NOT NULL,
+    contract_size REAL NOT NULL,
+    volume_min    REAL NOT NULL,
+    volume_max    REAL NOT NULL,
+    volume_step   REAL NOT NULL,
+    tick_value    REAL NOT NULL,
+    tick_size     REAL NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS setup_study (
+    setup      TEXT NOT NULL,
+    session    TEXT NOT NULL,
+    n          INTEGER NOT NULL,
+    wins       INTEGER NOT NULL,
+    win_rate   REAL NOT NULL,
+    avg_r      REAL,
+    total_pips REAL,
+    weight     REAL NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (setup, session)
+);
+
 CREATE TABLE IF NOT EXISTS alerts (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
     ts      TEXT NOT NULL,
@@ -575,6 +601,75 @@ class Database:
                 "INSERT INTO alerts(ts,level,source,message) VALUES(?,?,?,?)",
                 (utcnow().isoformat(), level, source, summary),
             )
+
+    def save_symbol_spec(self, spec) -> None:
+        """Cache the broker's real contract details.
+
+        Offline tools (study, backtest) otherwise fall back to FX defaults,
+        which are wrong by 100x for JPY pairs and 1000x for gold — making both
+        stop distances and pip counts meaningless for those symbols.
+        """
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO symbol_specs
+                   (symbol,digits,point,contract_size,volume_min,volume_max,
+                    volume_step,tick_value,tick_size,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(symbol) DO UPDATE SET
+                     digits=excluded.digits, point=excluded.point,
+                     contract_size=excluded.contract_size,
+                     volume_min=excluded.volume_min, volume_max=excluded.volume_max,
+                     volume_step=excluded.volume_step, tick_value=excluded.tick_value,
+                     tick_size=excluded.tick_size, updated_at=excluded.updated_at""",
+                (
+                    spec.symbol, spec.digits, spec.point, spec.contract_size,
+                    spec.volume_min, spec.volume_max, spec.volume_step,
+                    spec.tick_value, spec.tick_size, utcnow().isoformat(),
+                ),
+            )
+
+    def load_symbol_spec(self, symbol: str):
+        from ..contracts import SymbolSpec
+
+        rows = self.query("SELECT * FROM symbol_specs WHERE symbol=?", (symbol,))
+        if not rows:
+            return None
+        r = rows[0]
+        return SymbolSpec(
+            symbol=r["symbol"], digits=int(r["digits"]), point=float(r["point"]),
+            contract_size=float(r["contract_size"]), volume_min=float(r["volume_min"]),
+            volume_max=float(r["volume_max"]), volume_step=float(r["volume_step"]),
+            tick_value=float(r["tick_value"]), tick_size=float(r["tick_size"]),
+        )
+
+    def save_setup_study(self, rows: list[dict]) -> int:
+        """Persist a counterfactual study so the runtime can use it cheaply."""
+        if not rows:
+            return 0
+        now = utcnow().isoformat()
+        payload = [
+            (
+                r["setup"], r["session"], int(r["n"]), int(r["wins"]),
+                float(r["win_rate"]), r.get("avg_r"), r.get("total_pips"),
+                float(r["weight"]), now,
+            )
+            for r in rows
+        ]
+        with self.connect() as conn:
+            conn.executemany(
+                """INSERT INTO setup_study
+                   (setup,session,n,wins,win_rate,avg_r,total_pips,weight,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(setup,session) DO UPDATE SET
+                     n=excluded.n, wins=excluded.wins, win_rate=excluded.win_rate,
+                     avg_r=excluded.avg_r, total_pips=excluded.total_pips,
+                     weight=excluded.weight, created_at=excluded.created_at""",
+                payload,
+            )
+        return len(payload)
+
+    def setup_study(self) -> list:
+        return self.query("SELECT * FROM setup_study")
 
     def recent_alerts(self, limit: int = 20) -> list[sqlite3.Row]:
         return self.query("SELECT * FROM alerts ORDER BY ts DESC LIMIT ?", (limit,))

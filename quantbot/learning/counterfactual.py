@@ -89,7 +89,9 @@ def simulate_setup_outcomes(
     if frame.empty:
         return pd.DataFrame()
 
-    spec = spec or SymbolSpec(symbol=symbol)
+    # Real contract details when we have them; FX defaults are wrong by 100x
+    # for JPY pairs and 1000x for gold.
+    spec = spec or db.load_symbol_spec(symbol) or SymbolSpec(symbol=symbol)
     horizon = max_hold_bars or max(cfg.model.horizon_bars * 3, 24)
     atr_col = f"{base_tf}_atr"
 

@@ -176,6 +176,22 @@ strategy:
   reliability_min_weight: 0.6
   reliability_max_weight: 1.4
 
+  # The setup selector: P(this setup wins | this context), trained by
+  # `quantbot study --save` on counterfactual triggers. It answers "which of my
+  # strategies works HERE", which is the question the study data can actually
+  # answer — unlike "up or down", which sits at the majority-class baseline.
+  #
+  # Measured out-of-sample (40,627 triggers, EURUSD/GBPUSD/USDJPY, after
+  # 2026-04-06): worst decile avg_r -0.141, best decile +0.088, and filtering at
+  # p_win >= 0.55 gave win 0.603 / avg_r +0.301 on 481 triggers. Every decile
+  # below ~0.45 lost money, which is where selector_veto_below is set.
+  #
+  # Those are simulations with an optimistic cost model and heavily overlapping
+  # samples. Treat as a strong hypothesis, not a proven edge.
+  use_selector: true
+  selector_weight: 0.4        # how much it may scale a setup's quality
+  selector_veto_below: 0.45   # drop setups it rates below this
+
   # ---- how triggers combine ----------------------------------------------
   min_setup_quality: 0.25    # ignore weak rule matches
   min_confluence: 1          # agreeing setups required to trade (2 = stricter)

@@ -49,8 +49,17 @@ class SetupReliability:
     min_weight: float = 0.6
     max_weight: float = 1.4
 
-    def weight(self, setup_name: str) -> float:
-        """Multiplier for a setup. Unknown setups get 1.0 — no opinion."""
+    def weight(self, setup_name: str, session: str | None = None) -> float:
+        """Multiplier for a setup. Unknown setups get 1.0 — no opinion.
+
+        A session-specific entry wins when present: the study showed the same
+        setup can be profitable in London and lose money in Sydney, so one
+        global number per setup would average away the finding.
+        """
+        if session:
+            stat = self.stats.get(f"{setup_name}@{session}")
+            if stat is not None:
+                return stat.weight
         stat = self.stats.get(setup_name)
         return stat.weight if stat is not None else 1.0
 
@@ -189,3 +198,80 @@ def from_counterfactual(
         )
     log.info("setup reliability seeded from %d simulated triggers", len(df))
     return rel
+
+
+def study_stats_rows(df, prior_strength: float = 200.0, min_samples: int = 100,
+                     min_weight: float = 0.6, max_weight: float = 1.4) -> list[dict]:
+    """Study outcomes -> rows for `Database.save_setup_study`.
+
+    Emits one row per (setup, session) plus a `*` session row per setup, so the
+    runtime can fall back when a pair trades a session the study never covered.
+    """
+    if df is None or len(df) == 0:
+        return []
+    out: list[dict] = []
+
+    def _row(setup, session, group):
+        n, wins = int(len(group)), int(group["won"].sum())
+        shrunk = (wins + 0.5 * prior_strength) / (n + prior_strength)
+        weight = (
+            min(max(shrunk / 0.5, min_weight), max_weight) if n >= min_samples else 1.0
+        )
+        return {
+            "setup": setup,
+            "session": session,
+            "n": n,
+            "wins": wins,
+            "win_rate": round(wins / n, 4) if n else 0.5,
+            "avg_r": round(float(group["r_multiple"].mean()), 4)
+            if "r_multiple" in group
+            else None,
+            "total_pips": round(float(group["pips"].sum()), 2) if "pips" in group else None,
+            "weight": round(weight, 4),
+        }
+
+    for (setup, session), group in df.groupby(["setup", "session"]):
+        out.append(_row(setup, session, group))
+    for setup, group in df.groupby("setup"):
+        out.append(_row(setup, "*", group))
+    return out
+
+
+def from_store(db, min_weight: float = 0.6, max_weight: float = 1.4) -> SetupReliability:
+    """Load persisted study weights, keyed `setup` and `setup@session`."""
+    rel = SetupReliability(min_weight=min_weight, max_weight=max_weight)
+    try:
+        rows = db.setup_study()
+    except Exception as exc:
+        log.debug("no persisted study: %s", exc)
+        return rel
+    for r in rows:
+        key = r["setup"] if r["session"] == "*" else f"{r['setup']}@{r['session']}"
+        rel.stats[key] = SetupStats(
+            name=key,
+            n=int(r["n"]),
+            wins=int(r["wins"]),
+            raw_accuracy=float(r["win_rate"]),
+            shrunk_accuracy=float(r["win_rate"]),
+            weight=float(r["weight"]),
+        )
+    if rel.stats:
+        log.info("loaded %d persisted study weights", len(rel.stats))
+    return rel
+
+
+def combine(journal: SetupReliability, study: SetupReliability) -> SetupReliability:
+    """Journal evidence wins where it exists; study fills the rest.
+
+    Realized trades beat simulations, but there are far fewer of them — so the
+    study supplies the prior and the journal overrides setup by setup as it
+    accumulates enough samples to have an opinion at all.
+    """
+    merged = SetupReliability(
+        min_weight=journal.min_weight, max_weight=journal.max_weight
+    )
+    merged.stats.update(study.stats)
+    for name, stat in journal.stats.items():
+        if stat.weight != 1.0:  # journal only overrides once it has an opinion
+            merged.stats[name] = stat
+    return merged

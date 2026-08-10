@@ -213,6 +213,14 @@ class StrategyConfig:
     reliability_min_samples: int = 20
     reliability_min_weight: float = 0.6
     reliability_max_weight: float = 1.4
+    #: Use the setup-selector model — P(this setup wins | this context),
+    #: trained on counterfactual study rows (learning/selector.py).
+    use_selector: bool = True
+    selector_weight: float = 0.4        # how much it may scale quality
+    #: Drop a setup the selector rates below this. Measured out-of-sample on
+    #: 40k simulated triggers, every decile below ~0.45 had negative
+    #: expectancy, so this is where the evidence puts the line — not a guess.
+    selector_veto_below: float = 0.45
 
     #: Entry timing. "off" enters on the trigger bar; "momentum" waits for
     #: price to move in favour first; "pullback" waits for a retrace.
