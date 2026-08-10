@@ -54,8 +54,20 @@ _IMPACT_ALIASES = {
 
 
 def _norm_impact(value: object) -> Impact:
+    """Normalize the many spellings vendors use for impact.
+
+    Exact keys first, then substring matching, because real exports say things
+    like "High Impact Expected" or "Non-Economic" rather than a bare "high".
+    """
     text = str(value).strip().lower()
-    return _IMPACT_ALIASES.get(text, Impact.UNKNOWN)
+    if text in _IMPACT_ALIASES:
+        return _IMPACT_ALIASES[text]
+    if "non-economic" in text or "holiday" in text:
+        return Impact.HOLIDAY
+    for key in ("high", "medium", "moderate", "low"):
+        if key in text:
+            return _IMPACT_ALIASES[key]
+    return Impact.UNKNOWN
 
 
 def read_calendar_csv(path: str | Path, tz_offset_hours: float = 0.0) -> list[CalendarEvent]:
@@ -110,6 +122,31 @@ def read_calendar_csv(path: str | Path, tz_offset_hours: float = 0.0) -> list[Ca
 def import_calendar(db, path: str | Path, tz_offset_hours: float = 0.0) -> int:
     events = read_calendar_csv(path, tz_offset_hours)
     return db.upsert_events(events)
+
+
+def calendar_coverage_end(db, max_gap_days: float = 14.0):
+    """Last timestamp before the calendar goes sparse.
+
+    The naive `max(ts_utc)` is wrong: the live weekly feed adds events for the
+    *coming* week, so the maximum sits in the future even when the historical
+    archive stopped a year ago. Training truncated on that would keep a huge
+    news-blind middle section.
+
+    This instead walks back to the end of the last densely-populated run — the
+    point after which there is a gap longer than `max_gap_days`.
+    """
+    df = db.events_df()
+    if df.empty:
+        return None
+    ts = df["ts_utc"].sort_values().reset_index(drop=True)
+    if len(ts) < 2:
+        return ts.iloc[-1]
+    gaps = ts.diff().dt.total_seconds() / 86400
+    big = gaps[gaps > max_gap_days]
+    if big.empty:
+        return ts.iloc[-1]
+    # The event immediately before the last oversized gap ends the dense run.
+    return ts.iloc[int(big.index[-1]) - 1]
 
 
 def calendar_coverage(db, start=None, end=None) -> dict:

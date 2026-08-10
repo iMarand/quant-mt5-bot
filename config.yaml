@@ -38,7 +38,7 @@ data:
   base_timeframe: M15
   # Base-timeframe bars used for features/training. 30000 M15 bars is ~1.5
   # years, enough to span several regimes; ingest scales this per timeframe.
-  history_bars: 30000
+  history_bars: 90000   # M15 bars; paged from MT5, reaches back to 2022
   # Cross-asset context (addendum §A) — add only symbols your broker offers.
   correlated_symbols: []
 
@@ -261,6 +261,10 @@ strategy:
 
 model:
   horizon_bars: 8        # 8 x M15 = 2 hours
+  # Train only where the calendar reaches. Off = the latest walk-forward
+  # folds are news-blind, so event features look useless however good
+  # they are. Extend the calendar (import-calendar) rather than disabling.
+  limit_to_calendar_coverage: true
   label_atr_mult: 1.0
   min_train_rows: 800
   n_splits: 5

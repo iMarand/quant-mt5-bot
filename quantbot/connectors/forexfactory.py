@@ -42,7 +42,10 @@ def parse_number(value: object) -> float | None:
     if value is None:
         return None
     if isinstance(value, (int, float)):
-        return float(value)
+        # An empty CSV cell arrives as float('nan'); that means "no value",
+        # not "the value is NaN" — returning it would poison every surprise
+        # computed downstream.
+        return None if value != value else float(value)
     text = str(value).strip()
     if not text or text in {"-", "--", "n/a", "N/A"}:
         return None

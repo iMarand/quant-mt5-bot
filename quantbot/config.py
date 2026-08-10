@@ -102,6 +102,11 @@ class RiskConfig:
 class ModelConfig:
     horizon_bars: int = 8  # label horizon on the base timeframe
     label_atr_mult: float = 1.0  # triple-barrier width in ATR units
+    #: Truncate training to the window the calendar actually covers.
+    #: Without this, walk-forward validates on the most recent folds — which
+    #: are exactly the ones with no calendar data — so the news features look
+    #: useless no matter how good they are.
+    limit_to_calendar_coverage: bool = True
     min_train_rows: int = 800
     n_splits: int = 5  # walk-forward folds
     embargo_bars: int = 24

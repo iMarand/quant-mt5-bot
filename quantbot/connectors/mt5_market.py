@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from ..contracts import Candle, SymbolSpec, Tick, as_utc, tf_minutes
 
@@ -110,6 +110,8 @@ class MT5MarketData:
     #: Retries for a timeframe the terminal is still downloading.
     max_fetch_attempts = 4
     fetch_retry_delay_s = 3.0
+    #: MT5 rejects larger single requests with 'Invalid params'.
+    max_bars_per_request = 50_000
 
     def __init__(
         self,
@@ -194,6 +196,31 @@ class MT5MarketData:
         acct = _mt5().account_info()
         return acct._asdict() if acct else {}
 
+    def _fetch_chunk(self, symbol: str, timeframe: str, tf, count: int, end):
+        """One page of rates, retried while the terminal downloads history."""
+        mt5 = _mt5()
+        for attempt in range(self.max_fetch_attempts):
+            if end is None:
+                rates = mt5.copy_rates_from_pos(symbol, tf, 0, int(count))
+            else:
+                rates = mt5.copy_rates_from(symbol, tf, as_utc(end), int(count))
+            if rates is not None and len(rates) > 0:
+                return rates
+            code, msg = mt5.last_error()
+            # -2 "Invalid params" means we asked for more than MT5 will serve,
+            # not that the data is missing; retrying the same call won't help.
+            if code == -2:
+                log.debug("%s %s chunk rejected (%s) %s", symbol, timeframe, code, msg)
+                return None
+            if attempt < self.max_fetch_attempts - 1:
+                log.info(
+                    "%s %s not ready ((%s) %s); terminal is likely still downloading, "
+                    "retrying in %.0fs",
+                    symbol, timeframe, code, msg, self.fetch_retry_delay_s,
+                )
+                time.sleep(self.fetch_retry_delay_s)
+        return None
+
     # -- data --------------------------------------------------------------
     def fetch_candles(
         self,
@@ -203,37 +230,35 @@ class MT5MarketData:
         end: datetime | None = None,
     ) -> list[Candle]:
         self.connect()
-        mt5 = _mt5()
         tf = mt5_timeframe(timeframe)
         self.symbol_spec(symbol)  # ensures the symbol is selected
-        # The first request for a timeframe the terminal hasn't cached starts a
-        # background download and fails outright. Retrying after a moment is
-        # the documented way through; without it a fresh account silently
-        # ingests nothing for its higher timeframes.
-        rates = None
-        for attempt in range(self.max_fetch_attempts):
-            if end is None:
-                rates = mt5.copy_rates_from_pos(symbol, tf, 0, int(count))
-            else:
-                rates = mt5.copy_rates_from(symbol, tf, as_utc(end), int(count))
-            if rates is not None and len(rates) > 0:
-                break
-            code, msg = mt5.last_error()
-            if attempt < self.max_fetch_attempts - 1:
-                log.info(
-                    "%s %s not ready ((%s) %s); terminal is likely still downloading, "
-                    "retrying in %.0fs",
-                    symbol, timeframe, code, msg, self.fetch_retry_delay_s,
-                )
-                time.sleep(self.fetch_retry_delay_s)
 
-        if rates is None or len(rates) == 0:
-            code, msg = mt5.last_error()
-            log.warning(
-                "no rates for %s %s after %d attempts: (%s) %s",
-                symbol, timeframe, self.max_fetch_attempts, code, msg,
+        # MT5 rejects a single request above ~50k bars with "Invalid params",
+        # so deep history has to be paged backwards. Without this the usable
+        # window is capped at 50k bars, which on M15 reaches back only ~2
+        # years — not far enough to overlap a historical calendar.
+        collected: dict[int, object] = {}
+        cursor = end
+        while len(collected) < count:
+            want = min(count - len(collected), self.max_bars_per_request)
+            batch = self._fetch_chunk(symbol, timeframe, tf, want, cursor)
+            if batch is None or len(batch) == 0:
+                break
+            before = len(collected)
+            for r in batch:
+                collected[int(r["time"])] = r
+            if len(collected) == before:
+                break  # no new bars: the broker has no more history
+            oldest = min(int(r["time"]) for r in batch)
+            # Step one bar past the oldest so the next page doesn't repeat it.
+            cursor = datetime.fromtimestamp(oldest, tz=timezone.utc) - timedelta(
+                minutes=tf_minutes(timeframe)
             )
+
+        if not collected:
             return []
+
+        rates = [collected[k] for k in sorted(collected)][-int(count) :]
         out: list[Candle] = []
         for r in rates:
             out.append(
