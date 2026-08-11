@@ -360,3 +360,40 @@ def test_alerts_are_stored_as_a_single_scannable_line(db):
     db.alert("warn", "test", long)
     assert len(db.recent_alerts(1)[0]["message"]) <= db.ALERT_MAX_LEN
     assert summarize("\n\n  real line\nsecond") == "real line"
+
+
+def test_calendar_gap_is_excluded_but_both_sides_are_kept(db):
+    """An archive ending before the live feed starts leaves a permanent hole.
+
+    Truncating at a single boundary kept only the older block and silently threw
+    away everything the bot collects from now on.
+    """
+    import pandas as pd
+
+    from quantbot.connectors.calendar_import import calendar_covered_mask, calendar_gaps
+
+    def ev(when, i):
+        return CalendarEvent(
+            f"e{i}", "test", "USD", "CPI",
+            pd.Timestamp(when, tz="UTC").to_pydatetime(), Impact.HIGH,
+        )
+
+    # Archive through March, nothing until August, then a live feed.
+    events = [ev(f"2026-01-{d:02d} 12:00", d) for d in range(1, 29)]
+    events += [ev(f"2026-02-{d:02d} 12:00", 100 + d) for d in range(1, 29)]
+    events += [ev(f"2026-03-{d:02d} 12:00", 200 + d) for d in range(1, 29)]
+    events += [ev(f"2026-08-{d:02d} 12:00", 300 + d) for d in range(1, 15)]
+    db.upsert_events(events)
+
+    gaps = calendar_gaps(db, max_gap_days=14)
+    assert len(gaps) == 1
+    assert gaps[0][0].month == 3 and gaps[0][1].month == 8
+
+    idx = pd.DatetimeIndex(
+        [pd.Timestamp(t, tz="UTC") for t in
+         ["2026-02-10 12:00", "2026-05-15 12:00", "2026-08-05 12:00"]]
+    )
+    mask = calendar_covered_mask(idx, db, max_gap_days=14)
+    assert bool(mask.iloc[0]) is True, "archive side must be kept"
+    assert bool(mask.iloc[1]) is False, "the hole must be dropped"
+    assert bool(mask.iloc[2]) is True, "live-feed side must be kept too"

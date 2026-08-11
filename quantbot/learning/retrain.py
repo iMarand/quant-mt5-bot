@@ -61,24 +61,23 @@ def build_training_set(cfg: Config, db: Database, symbol: str) -> TrainingSet:
     # and puts the blind rows in the latest walk-forward folds where validation
     # actually happens.
     if cfg.model.limit_to_calendar_coverage:
-        from ..connectors.calendar_import import calendar_coverage_end
+        from ..connectors.calendar_import import calendar_covered_mask
 
-        last_event = calendar_coverage_end(db)
-        if last_event is not None:
-            covered = joined.index <= last_event
-            kept, total = int(covered.sum()), len(joined)
-            if kept >= cfg.model.min_train_rows and kept < total:
-                log.info(
-                    "limiting training to calendar coverage: %d/%d rows (through %s)",
-                    kept, total, last_event.date(),
-                )
-                joined = joined[covered]
-            elif kept < cfg.model.min_train_rows:
-                log.warning(
-                    "calendar covers only %d rows (< min_train_rows=%d); training on "
-                    "the full span instead — news features will be mostly empty",
-                    kept, cfg.model.min_train_rows,
-                )
+        covered = calendar_covered_mask(joined.index, db)
+        kept, total = int(covered.sum()), len(joined)
+        if kept >= cfg.model.min_train_rows and kept < total:
+            log.info(
+                "training on calendar-covered rows only: %d/%d (dropped %d in gaps)",
+                kept, total, total - kept,
+            )
+            joined = joined[covered.to_numpy()]
+        elif kept < cfg.model.min_train_rows:
+            log.warning(
+                "calendar covers only %d rows (< min_train_rows=%d); training on "
+                "the full span instead — news features will be mostly empty",
+                kept, cfg.model.min_train_rows,
+            )
+
     cols = feature_columns(joined)
     # Rows where every feature is NaN are warm-up bars, not data.
     joined = joined.dropna(subset=cols, thresh=max(1, int(len(cols) * 0.6)))

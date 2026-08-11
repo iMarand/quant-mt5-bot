@@ -124,29 +124,57 @@ def import_calendar(db, path: str | Path, tz_offset_hours: float = 0.0) -> int:
     return db.upsert_events(events)
 
 
-def calendar_coverage_end(db, max_gap_days: float = 14.0):
-    """Last timestamp before the calendar goes sparse.
+def calendar_gaps(db, max_gap_days: float = 14.0) -> list[tuple]:
+    """Periods where the calendar has no events — (gap_start, gap_end) pairs.
 
-    The naive `max(ts_utc)` is wrong: the live weekly feed adds events for the
-    *coming* week, so the maximum sits in the future even when the historical
-    archive stopped a year ago. Training truncated on that would keep a huge
-    news-blind middle section.
-
-    This instead walks back to the end of the last densely-populated run — the
-    point after which there is a gap longer than `max_gap_days`.
+    A historical archive that ends before the live feed begins leaves a
+    permanent hole. Training must exclude rows inside that hole, but there is no
+    reason to throw away the good data on *either* side of it.
     """
+    df = db.events_df()
+    if df.empty:
+        return []
+    ts = df["ts_utc"].sort_values().reset_index(drop=True)
+    if len(ts) < 2:
+        return []
+    gaps = ts.diff().dt.total_seconds() / 86400
+    return [
+        (ts.iloc[i - 1], ts.iloc[i]) for i in gaps.index[gaps > max_gap_days] if i > 0
+    ]
+
+
+def calendar_covered_mask(index, db, max_gap_days: float = 14.0):
+    """Boolean mask of timestamps that sit inside calendar coverage.
+
+    Supersedes truncating at a single boundary. With an archive covering
+    2007-2025 and a live feed covering 2026 onward, truncation kept only the
+    older block and silently discarded everything the bot collects from now on —
+    so months of accumulating calendar data would never reach training.
+    Filtering instead keeps both sides and drops only the hole between them.
+    """
+    import pandas as pd
+
+    idx = pd.DatetimeIndex(index)
+    df = db.events_df()
+    if df.empty:
+        return pd.Series(False, index=idx)
+
+    first, last = df["ts_utc"].min(), df["ts_utc"].max()
+    mask = pd.Series((idx >= first) & (idx <= last), index=idx)
+    for gap_start, gap_end in calendar_gaps(db, max_gap_days):
+        mask &= ~((idx > gap_start) & (idx < gap_end))
+    return mask
+
+
+def calendar_coverage_end(db, max_gap_days: float = 14.0):
+    """End of the most recent dense run. Kept for callers that want a boundary."""
     df = db.events_df()
     if df.empty:
         return None
     ts = df["ts_utc"].sort_values().reset_index(drop=True)
     if len(ts) < 2:
         return ts.iloc[-1]
-    gaps = ts.diff().dt.total_seconds() / 86400
-    big = gaps[gaps > max_gap_days]
-    if big.empty:
-        return ts.iloc[-1]
-    # The event immediately before the last oversized gap ends the dense run.
-    return ts.iloc[int(big.index[-1]) - 1]
+    return ts.iloc[-1]
 
 
 def calendar_coverage(db, start=None, end=None) -> dict:
